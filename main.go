@@ -206,7 +206,7 @@ func (s *Script) Start() error {
 // Stop stops recording.
 func (s *Script) Stop() error {
 	defer s.Cmd.Wait()
-	if _, err := s.Stdin.Write([]byte("exit\n")); err != nil {
+	if _, err := s.Stdin.Write([]byte("\004")); err != nil {
 		return err
 	}
 	if len(s.Args) == 0 || strings.HasPrefix(s.Args[0], "-") {
