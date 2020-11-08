@@ -2,10 +2,12 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -14,24 +16,51 @@ import (
 	"time"
 )
 
-const CtrlPrefix = "#$"
-
 var (
-	Usage          = "usage: " + os.Args[0] + " <script>"
 	ErrUnknownCtrl = errors.New("unknown control command")
 	ErrNoArgs      = errors.New("no arguments given to command")
 	ErrBadArg      = errors.New("invalid command argument")
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] == "-h" || os.Args[1] == "--help" {
-		log.Fatal(Usage)
+
+	// Flags
+	var Exit bool
+	flag.BoolVar(&Exit, "exit", false, "writing exit to end asciinema session instead of ctr-D")
+	var Humanize bool
+	flag.BoolVar(&Humanize, "humanize", false, "humanize typewrittingu using a normal law")
+	var CtrlPrefix string
+	flag.StringVar(&CtrlPrefix, "ctrl-prefix", "#$", "prefix for command in asciiscript file")
+	var InputFile string
+	flag.StringVar(&InputFile, "inputfile", "", "asciiscript input")
+	var ArgsString string
+	flag.StringVar(&ArgsString, "args", "", "asciinema arguments")
+
+	var Wait int64
+	flag.Int64Var(&Wait, "wait", 150, "time between commands")
+
+	var Delay int64
+	flag.Int64Var(&Delay, "delay", 80, "time between characters, if humanized, mean of the normal law")
+
+	var StdDeviation int64
+	flag.Int64Var(&StdDeviation, "stddeviation", 60, "standart deviation used in the normal law when humanized")
+
+	flag.Parse()
+	Args := strings.Fields(ArgsString)
+
+	if InputFile == "" {
+		log.Fatal("no script file provided")
 	}
+
 	if exec.Command("asciinema", "-h").Run() != nil {
 		log.Fatal("can't find asciinema executable")
 	}
 
-	s, err := NewScript(os.Args[1], os.Args[2:])
+	if Humanize {
+		rand.Seed(time.Now().UnixNano())
+	}
+
+	s, err := NewScript(InputFile, Args, Wait, Delay, CtrlPrefix, Exit, Humanize, StdDeviation)
 	if err != nil {
 		log.Fatal("parsing script failed: ", err)
 	}
@@ -72,13 +101,19 @@ func (s Shell) Run(sc *Script) {
 		if _, err := sc.Stdin.Write([]byte(fmt.Sprintf("%s", string(c)))); err != nil {
 			os.Exit(1)
 		}
-		time.Sleep(sc.Delay)
+		if sc.Humanize {
+			r := int64(rand.NormFloat64()*float64(sc.StdDeviation) + float64(sc.Delay))
+			time.Sleep(time.Millisecond * time.Duration(r))
+		} else {
+			time.Sleep(time.Millisecond * time.Duration(sc.Delay))
+		}
+
 	}
 }
 
 // Wait is a command to change the interval between commands.
 type Wait struct {
-	Duration time.Duration
+	Duration int64
 }
 
 // NewWait creates a new Wait.
@@ -92,7 +127,7 @@ func NewWait(opts []string) (Wait, error) {
 		return Wait{}, ErrBadArg
 	}
 
-	return Wait{Duration: time.Millisecond * time.Duration(ms)}, nil
+	return Wait{Duration: ms}, nil
 }
 
 // Run changes the wait for subsequent commands.
@@ -102,7 +137,7 @@ func (w Wait) Run(s *Script) {
 
 // Delay is a command to change the typing speed of subsequent commands.
 type Delay struct {
-	Interval time.Duration
+	Interval int64
 }
 
 // NewDelay creates a new Delay.
@@ -116,7 +151,7 @@ func NewDelay(opts []string) (Delay, error) {
 		return Delay{}, ErrBadArg
 	}
 
-	return Delay{Interval: time.Millisecond * time.Duration(ms)}, nil
+	return Delay{Interval: ms}, nil
 }
 
 // Run changes the typing speed for subsequent commands.
@@ -139,27 +174,35 @@ func NewCtrl(cmd string) (Command, error) {
 
 // Script is a shell script to be run and recorded by asciinema.
 type Script struct {
-	Args     []string
-	Commands []Command
-	Delay    time.Duration
-	Wait     time.Duration
-	Cmd      *exec.Cmd
-	Stdin    io.WriteCloser
-	Stdout   io.ReadCloser
-	Stderr   io.ReadCloser
+	Args         []string
+	Commands     []Command
+	Delay        int64
+	Wait         int64
+	Cmd          *exec.Cmd
+	Stdin        io.WriteCloser
+	Stdout       io.ReadCloser
+	Stderr       io.ReadCloser
+	CtrlPrefix   string
+	Humanize     bool
+	StdDeviation int64
+	Exit         bool
 }
 
 // NewScript parses a new Script from the script file at path.
-func NewScript(path string, args []string) (*Script, error) {
+func NewScript(path string, args []string, Wait int64, Delay int64, CtrlPrefix string, Exit bool, Humanize bool, StdDeviation int64) (*Script, error) {
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Script{
-		Args:  args,
-		Delay: time.Millisecond * 40,
-		Wait:  time.Millisecond * 100,
+		Args:         args,
+		Delay:        Delay,
+		Wait:         Wait,
+		CtrlPrefix:   CtrlPrefix,
+		Exit:         Exit,
+		Humanize:     Humanize,
+		StdDeviation: StdDeviation,
 	}
 
 	lines := strings.Split(string(b), "\n")
@@ -167,8 +210,8 @@ func NewScript(path string, args []string) (*Script, error) {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, CtrlPrefix) {
-			ctrl, err := NewCtrl(strings.TrimSpace(line[len(CtrlPrefix):]))
+		if strings.HasPrefix(line, s.CtrlPrefix) {
+			ctrl, err := NewCtrl(strings.TrimSpace(line[len(s.CtrlPrefix):]))
 			if err != nil {
 				return nil, fmt.Errorf("%v (line %d)", err, i+1)
 			}
@@ -184,6 +227,7 @@ func NewScript(path string, args []string) (*Script, error) {
 // Start starts recording.
 func (s *Script) Start() error {
 	args := append([]string{"rec"}, s.Args...)
+	fmt.Print(args)
 	s.Cmd = exec.Command("asciinema", args...)
 	var err error
 	if s.Stdin, err = s.Cmd.StdinPipe(); err != nil {
@@ -206,7 +250,12 @@ func (s *Script) Start() error {
 // Stop stops recording.
 func (s *Script) Stop() error {
 	defer s.Cmd.Wait()
-	if _, err := s.Stdin.Write([]byte("\004")); err != nil {
+	ending := "\004"
+	if s.Exit {
+		ending = "exit\n"
+	}
+
+	if _, err := s.Stdin.Write([]byte(ending)); err != nil {
 		return err
 	}
 	if len(s.Args) == 0 || strings.HasPrefix(s.Args[0], "-") {
@@ -243,7 +292,8 @@ func (s *Script) endDialog() {
 func (s *Script) Execute() {
 	for _, c := range s.Commands {
 		c.Run(s)
-		time.Sleep(s.Wait)
+
+		time.Sleep(time.Millisecond * time.Duration(s.Wait))
 	}
 }
 
